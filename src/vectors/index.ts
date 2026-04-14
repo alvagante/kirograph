@@ -1,7 +1,7 @@
 /**
  * KiroGraph Vector Manager
  *
- * Semantic search using nomic-ai/nomic-embed-text-v1.5 via @xenova/transformers.
+ * Semantic search via configurable local embedding models using @huggingface/transformers v3.
  * Mirrors CodeGraph src/vectors/ (embedder.ts + manager.ts) adapted for KiroGraph:
  *   - Cache dir: ~/.kirograph/models/ (not ~/.codegraph/models/)
  *   - Embeddings stored in the `vectors` SQLite table
@@ -28,7 +28,7 @@ import { TypesenseIndex } from './typesense-index';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL = 'nomic-ai/nomic-embed-text-v1.5';
-const EMBEDDING_DIM = 768; // nomic-embed-text-v1.5 produces 768-dim vectors
+const DEFAULT_EMBEDDING_DIM = 768;
 const GLOBAL_MODELS_DIR = path.join(homedir(), '.kirograph', 'models');
 const BATCH_SIZE = 32;
 
@@ -40,11 +40,11 @@ const EMBEDDABLE_KINDS = new Set<Node['kind']>([
 // ── Embedder ──────────────────────────────────────────────────────────────────
 
 type Pipeline = any;
-let transformers: typeof import('@xenova/transformers') | null = null;
+let transformers: typeof import('@huggingface/transformers') | null = null;
 
 async function getTransformers() {
   if (!transformers) {
-    transformers = await import('@xenova/transformers');
+    transformers = await import('@huggingface/transformers');
   }
   return transformers;
 }
@@ -119,7 +119,7 @@ export class VectorManager {
    * Fails silently so callers can continue without semantic search.
    * When config.useVecIndex is true, also initializes the sqlite-vec ANN index.
    */
-  async initialize(): Promise<void> {
+  async initialize(onProgress?: (file: string, loaded: number, total: number, done: boolean) => void): Promise<void> {
     if (!this.config.enableEmbeddings) {
       logDebug('VectorManager: embeddings disabled');
       return;
@@ -143,12 +143,46 @@ export class VectorManager {
       }
 
       // Skip remote check if model already cached (HuggingFace uses '--' as path separator)
-      const cached = fs.existsSync(path.join(cacheDir, modelId.replace('/', '--')));
+      // HuggingFace transformers v3 stores models as <org>/<model>/ (v2 used <org>--<model>)
+      const cached = fs.existsSync(path.join(cacheDir, modelId));
       if (cached) env.allowRemoteModels = false;
 
-      this.pipeline = await pipeline('feature-extraction', modelId, { quantized: true });
+      let lastFile = '';
+      this.pipeline = await pipeline('feature-extraction', modelId, {
+        dtype: 'auto',
+        ...(!cached && onProgress ? {
+          progress_callback: (p: { status: string; file?: string; loaded?: number; total?: number }) => {
+            if (p.status === 'progress' && p.file) {
+              lastFile = p.file;
+              onProgress(p.file, p.loaded ?? 0, p.total ?? 0, false);
+            } else if (p.status === 'done' && lastFile) {
+              onProgress(lastFile, 1, 1, true);
+              lastFile = '';
+            }
+          },
+        } : {}),
+      });
+
+      // Validate embeddingDim against the model's actual output shape.
+      // Run a single test embedding and compare dims[1] to config.embeddingDim.
+      // If they differ, warn and update the runtime dim so downstream engines
+      // are initialised with the correct size (config.json is not rewritten here).
+      try {
+        const testOut = await this.pipeline('test', { pooling: 'mean', normalize: true });
+        const actualDim: number = testOut.dims?.[1] ?? (testOut.data?.length as number);
+        const configuredDim = this.config.embeddingDim ?? DEFAULT_EMBEDDING_DIM;
+        if (actualDim && actualDim !== configuredDim) {
+          logWarn(
+            `VectorManager: embeddingDim mismatch — config says ${configuredDim} but model outputs ${actualDim}. Using actual dim.`,
+            { model: modelId, configuredDim, actualDim },
+          );
+          // Patch the runtime config so all engine constructors below use the correct dim
+          (this.config as unknown as Record<string, unknown>).embeddingDim = actualDim;
+        }
+      } catch { /* test embedding failed — proceed with configured dim */ }
+
       this._initialized = true;
-      logDebug('VectorManager: model loaded', { modelId });
+      logDebug('VectorManager: model loaded', { modelId, embeddingDim: this.config.embeddingDim ?? DEFAULT_EMBEDDING_DIM });
     } catch (err) {
       logError('VectorManager: failed to load embedding model', {
         model: modelId,
@@ -164,8 +198,10 @@ export class VectorManager {
     if (this.projectRoot && engine !== 'cosine') {
       const kirographDir = path.join(this.projectRoot, '.kirograph');
 
-      if (engine === 'sqlite-vec') {
-        this.vecIndex = new VecIndex(kirographDir, EMBEDDING_DIM);
+      const embeddingDim = this.config.embeddingDim ?? DEFAULT_EMBEDDING_DIM;
+
+    if (engine === 'sqlite-vec') {
+        this.vecIndex = new VecIndex(kirographDir, embeddingDim);
         await this.vecIndex.initialize();
         if (this.vecIndex.isAvailable()) {
           logDebug('VectorManager: sqlite-vec ANN index ready');
@@ -174,7 +210,7 @@ export class VectorManager {
           logDebug('VectorManager: sqlite-vec unavailable, falling back to in-process cosine');
         }
       } else if (engine === 'orama') {
-        this.oramaIndex = new OramaIndex(kirographDir, EMBEDDING_DIM);
+        this.oramaIndex = new OramaIndex(kirographDir, embeddingDim);
         await this.oramaIndex.initialize();
         if (this.oramaIndex.isAvailable()) {
           logDebug('VectorManager: Orama hybrid index ready');
@@ -183,7 +219,7 @@ export class VectorManager {
           logDebug('VectorManager: Orama unavailable, falling back to in-process cosine');
         }
       } else if (engine === 'pglite') {
-        this.pgliteIndex = new PGliteIndex(kirographDir, EMBEDDING_DIM);
+        this.pgliteIndex = new PGliteIndex(kirographDir, embeddingDim);
         await this.pgliteIndex.initialize();
         if (this.pgliteIndex.isAvailable()) {
           logDebug('VectorManager: PGlite+pgvector hybrid index ready');
@@ -192,7 +228,7 @@ export class VectorManager {
           logDebug('VectorManager: PGlite unavailable, falling back to in-process cosine');
         }
       } else if (engine === 'lancedb') {
-        this.lancedbIndex = new LanceDBIndex(kirographDir, EMBEDDING_DIM);
+        this.lancedbIndex = new LanceDBIndex(kirographDir, embeddingDim);
         await this.lancedbIndex.initialize();
         if (this.lancedbIndex.isAvailable()) {
           logDebug('VectorManager: LanceDB ANN index ready');
@@ -201,7 +237,7 @@ export class VectorManager {
           logDebug('VectorManager: LanceDB unavailable, falling back to in-process cosine');
         }
       } else if (engine === 'qdrant') {
-        this.qdrantIndex = new QdrantIndex(kirographDir, EMBEDDING_DIM);
+        this.qdrantIndex = new QdrantIndex(kirographDir, embeddingDim);
         await this.qdrantIndex.initialize();
         if (this.qdrantIndex.isAvailable()) {
           logDebug('VectorManager: Qdrant ANN index ready');
@@ -210,7 +246,7 @@ export class VectorManager {
           logDebug('VectorManager: Qdrant unavailable, falling back to in-process cosine');
         }
       } else if (engine === 'typesense') {
-        this.typesenseIndex = new TypesenseIndex(kirographDir, EMBEDDING_DIM);
+        this.typesenseIndex = new TypesenseIndex(kirographDir, embeddingDim);
         await this.typesenseIndex.initialize();
         if (this.typesenseIndex.isAvailable()) {
           logDebug('VectorManager: Typesense ANN index ready');
@@ -325,7 +361,7 @@ export class VectorManager {
       try {
         const outputs = await this.pipeline(texts, { pooling: 'mean', normalize: true });
         const dims: number[] = outputs.dims;
-        const dim = dims[1] ?? EMBEDDING_DIM;
+        const dim = dims[1] ?? (this.config.embeddingDim ?? DEFAULT_EMBEDDING_DIM);
         const flat = toFloat32Array(outputs.data);
 
         // Collect Typesense batch for bulk import (one HTTP request per batch)

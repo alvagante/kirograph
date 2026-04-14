@@ -1,6 +1,6 @@
 {
   "name": "kirograph",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "Semantic code knowledge graph for Kiro — fewer tool calls, instant symbol lookups, 100% local.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,13 +10,12 @@
   },
   "files": [
     "dist",
-    "scripts",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.js && chmod +x dist/bin/kirograph.js",
-    "postinstall": "node scripts/postinstall.js",
-    "dev": "tsc --watch",
+    "build": "tsx scripts/build.ts",
+    "dev": "tsx scripts/build.ts --watch",
+    "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
@@ -29,13 +28,12 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@xenova/transformers": "^2.17.0",
+    "@huggingface/transformers": "^3.0.0",
     "commander": "^14.0.2",
     "figlet": "^1.11.0",
     "node-sqlite3-wasm": "^0.8.30",
     "picomatch": "^4.0.3",
     "tree-sitter-wasms": "^0.1.11",
-    "typesense": "^3.0.5",
     "web-tree-sitter": "^0.25.3"
   },
   "optionalDependencies": {
@@ -46,12 +44,15 @@
     "@qdrant/qdrant-js": "^1.17.0",
     "better-sqlite3": "^11.10.0",
     "qdrant-local": "^0.0.0-alpha.10",
-    "sqlite-vec": "^0.1.9"
+    "sqlite-vec": "^0.1.9",
+    "typesense": "^3.0.0"
   },
   "devDependencies": {
     "@types/figlet": "^1.7.0",
     "@types/node": "^20.0.0",
     "@types/picomatch": "^4.0.2",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.0.0",
     "vitest": "^4.1.2"
   },
@@ -59,6 +60,7 @@
     "node": ">=18.0.0"
   },
   "overrides": {
-    "tar": "^7.5.11"
+    "tar": "^7.5.11",
+    "axios": "^1.8.3"
   }
 }

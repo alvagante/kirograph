@@ -23,6 +23,7 @@ export interface KiroGraphConfig {
   // Parity fields:
   enableEmbeddings: boolean;
   embeddingModel: string;
+  embeddingDim: number;
   /** @deprecated Use semanticEngine instead. Kept for backwards compatibility. */
   useVecIndex: boolean;
   semanticEngine: 'cosine' | 'sqlite-vec' | 'orama' | 'pglite' | 'lancedb' | 'qdrant' | 'typesense';
@@ -31,6 +32,14 @@ export interface KiroGraphConfig {
   minLogLevel: 'debug' | 'info' | 'warn' | 'error';
   frameworkHints: string[];
   fuzzyResolutionThreshold: number; // 0.0–1.0
+  /** Enable architecture analysis (package graph + layer detection). Default: false. */
+  enableArchitecture: boolean;
+  /**
+   * User-defined layer → glob pattern overrides.
+   * When set, config-defined layers win over auto-detected ones.
+   * Example: { "api": ["src/routes/**", "src/controllers/**"] }
+   */
+  architectureLayers?: Record<string, string[]>;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -40,8 +49,10 @@ const CONFIG_FILE = 'config.json';
 
 const KNOWN_FIELDS = new Set<string>([
   'version', 'languages', 'include', 'exclude', 'maxFileSize',
-  'extractDocstrings', 'trackCallSites', 'enableEmbeddings', 'embeddingModel', 'useVecIndex', 'semanticEngine',
-  'typesenseDashboard', 'qdrantDashboard', 'minLogLevel', 'frameworkHints', 'fuzzyResolutionThreshold',
+  'extractDocstrings', 'trackCallSites', 'enableEmbeddings', 'embeddingModel', 'embeddingDim',
+  'useVecIndex', 'semanticEngine', 'typesenseDashboard', 'qdrantDashboard',
+  'minLogLevel', 'frameworkHints', 'fuzzyResolutionThreshold',
+  'enableArchitecture', 'architectureLayers',
 ]);
 
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
@@ -74,6 +85,7 @@ export function createDefaultConfig(_projectRoot?: string): KiroGraphConfig {
     trackCallSites: true,
     enableEmbeddings: false,
     embeddingModel: 'nomic-ai/nomic-embed-text-v1.5',
+    embeddingDim: 768,
     useVecIndex: false,
     semanticEngine: 'cosine',
     typesenseDashboard: false,
@@ -81,6 +93,7 @@ export function createDefaultConfig(_projectRoot?: string): KiroGraphConfig {
     minLogLevel: 'warn',
     frameworkHints: [],
     fuzzyResolutionThreshold: 0.5,
+    enableArchitecture: false,
   };
 }
 
@@ -122,15 +135,17 @@ export function validateConfig(config: unknown): KiroGraphConfig {
   const embeddingModel = typeof raw.embeddingModel === 'string' && raw.embeddingModel.length > 0
     ? raw.embeddingModel
     : defaults.embeddingModel;
+  const embeddingDim = typeof raw.embeddingDim === 'number' && raw.embeddingDim > 0
+    ? raw.embeddingDim
+    : defaults.embeddingDim;
   const useVecIndex = typeof raw.useVecIndex === 'boolean'
     ? raw.useVecIndex
     : defaults.useVecIndex;
   const SEMANTIC_ENGINES = new Set(['cosine', 'sqlite-vec', 'orama', 'pglite', 'lancedb', 'qdrant', 'typesense']);
   // useVecIndex is a legacy alias: if set and no explicit semanticEngine, map it
-  const rawEngine = typeof raw.semanticEngine === 'string' && SEMANTIC_ENGINES.has(raw.semanticEngine)
+  const semanticEngine = typeof raw.semanticEngine === 'string' && SEMANTIC_ENGINES.has(raw.semanticEngine)
     ? (raw.semanticEngine as KiroGraphConfig['semanticEngine'])
     : useVecIndex ? 'sqlite-vec' : defaults.semanticEngine;
-  const semanticEngine = rawEngine;
   const typesenseDashboard = typeof raw.typesenseDashboard === 'boolean'
     ? raw.typesenseDashboard
     : defaults.typesenseDashboard;
@@ -148,6 +163,10 @@ export function validateConfig(config: unknown): KiroGraphConfig {
     && raw.fuzzyResolutionThreshold <= 1
     ? raw.fuzzyResolutionThreshold
     : defaults.fuzzyResolutionThreshold;
+  const enableArchitecture = typeof raw.enableArchitecture === 'boolean'
+    ? raw.enableArchitecture
+    : defaults.enableArchitecture;
+  const architectureLayers = _validateArchitectureLayers(raw.architectureLayers);
 
   // Validate glob patterns — exclude unsafe regex patterns
   const include = _validatePatterns(raw.include, defaults.include);
@@ -163,6 +182,7 @@ export function validateConfig(config: unknown): KiroGraphConfig {
     trackCallSites,
     enableEmbeddings,
     embeddingModel,
+    embeddingDim,
     useVecIndex,
     semanticEngine,
     typesenseDashboard,
@@ -170,7 +190,22 @@ export function validateConfig(config: unknown): KiroGraphConfig {
     minLogLevel,
     frameworkHints,
     fuzzyResolutionThreshold,
+    enableArchitecture,
+    ...(architectureLayers !== undefined ? { architectureLayers } : {}),
   };
+}
+
+function _validateArchitectureLayers(raw: unknown): Record<string, string[]> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const result: Record<string, string[]> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== 'string') continue;
+    if (!Array.isArray(val)) continue;
+    const patterns = val.filter((p): p is string => typeof p === 'string' && isSafeRegex(p));
+    if (patterns.length > 0) result[key] = patterns;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function _validatePatterns(raw: unknown, fallback: string[]): string[] {

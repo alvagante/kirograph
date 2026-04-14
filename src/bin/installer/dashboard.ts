@@ -167,7 +167,7 @@ function getFreePort(): Promise<number> {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-export async function openTypesenseDashboard(projectRoot: string): Promise<void> {
+export async function openTypesenseDashboard(projectRoot: string): Promise<http.Server | null> {
   const kirographDir = path.join(projectRoot, '.kirograph');
   const cacheDir     = path.join(kirographDir, 'typesense', 'dashboard');
 
@@ -188,12 +188,12 @@ export async function openTypesenseDashboard(projectRoot: string): Promise<void>
       process.stdout.write(`  Dashboard ready.\n`);
     } catch (err) {
       process.stdout.write(`  Dashboard download failed: ${String(err)}\n`);
-      return;
+      return null;
     }
   }
 
   const dashboardPort = await getFreePort();
-  serveDashboard(cacheDir, dashboardPort);
+  const server = serveDashboard(cacheDir, dashboardPort);
 
   const url = `http://127.0.0.1:${dashboardPort}`;
 
@@ -206,4 +206,5 @@ export async function openTypesenseDashboard(projectRoot: string): Promise<void>
   console.log();
 
   openBrowser(url);
+  return server;
 }

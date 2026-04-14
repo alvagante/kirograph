@@ -2,9 +2,10 @@
  * KiroGraph Installer for Kiro
  *
  * Wires up:
- *  1. .kiro/settings/mcp.json  — registers the MCP server
- *  2. .kiro/hooks/*.json       — auto-sync on file save/create/delete (via mark-dirty + sync-if-dirty)
- *  3. .kiro/steering/kirograph.md — teaches Kiro to use the graph tools
+ *  1. .kiro/settings/mcp.json        — registers the MCP server (IDE + CLI)
+ *  2. .kiro/hooks/*.json             — auto-sync hooks for Kiro IDE
+ *  3. .kiro/steering/kirograph.md    — teaches Kiro to use the graph tools (IDE + CLI)
+ *  4. .kiro/agents/kirograph.json    — custom agent config for Kiro CLI
  */
 
 import * as path from 'path';
@@ -19,6 +20,7 @@ import { promptConfigOptions } from './config-prompt';
 import { writeMcpConfig } from './mcp';
 import { writeHooks } from './hooks';
 import { writeSteering } from './steering';
+import { writeCliAgent } from './cli-agent';
 import { openTypesenseDashboard } from './dashboard';
 import { ensureQdrantUI, openQdrantDashboard } from './qdrant-dashboard';
 
@@ -40,11 +42,14 @@ export async function runInstaller(): Promise<void> {
     // 1. MCP config
     writeMcpConfig(kiroDir);
 
-    // 2. Hooks
+    // 2. IDE hooks
     writeHooks(kiroDir);
 
-    // 3. Steering
+    // 3. Steering (IDE + CLI)
     writeSteering(kiroDir);
+
+    // 4. CLI agent config
+    writeCliAgent(kiroDir);
 
     // 4. Prompt for config options and persist
     const patch = await promptConfigOptions(rl);
@@ -53,7 +58,7 @@ export async function runInstaller(): Promise<void> {
       console.log(`\n  Configuration saved to ${cwd}/.kirograph/config.json`);
       console.log(`  • enableEmbeddings: ${patch.enableEmbeddings}`);
       if ('embeddingModel' in patch) {
-        console.log(`  • embeddingModel: ${patch.embeddingModel}`);
+        console.log(`  • embeddingModel: ${patch.embeddingModel}  ${dim}(${patch.embeddingDim}-dim)${reset}`);
       }
       if (patch.enableEmbeddings) {
         console.log(`  • semanticEngine: ${patch.semanticEngine}`);
@@ -116,6 +121,7 @@ export async function runInstaller(): Promise<void> {
       }
       console.log(`  • extractDocstrings: ${patch.extractDocstrings}`);
       console.log(`  • trackCallSites: ${patch.trackCallSites}`);
+      console.log(`  • enableArchitecture: ${patch.enableArchitecture}`);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`\n  ✗ Failed to write configuration: ${reason}`);
@@ -131,11 +137,50 @@ export async function runInstaller(): Promise<void> {
     const doIndex = await ask(rl, '\n  Initialize and index this project now? (Y/n) ');
     if (doIndex.toLowerCase() !== 'n') {
       const KiroGraph = (await import('../../index')).default;
-      if (!KiroGraph.isInitialized(cwd)) {
-        await KiroGraph.init(cwd);
-        console.log('  ✓ Created .kirograph/');
+
+      const fileBytes = new Map<string, { loaded: number; total: number }>();
+      const modelProgress = (file: string, loaded: number, total: number, done: boolean): void => {
+        const entry = fileBytes.get(file) ?? { loaded: 0, total: 0 };
+        if (total > 0) entry.total = total;
+        entry.loaded = done ? entry.total : loaded;
+        fileBytes.set(file, entry);
+
+        // Only count files where we know the size (content-length was present)
+        const knownFiles = Array.from(fileBytes.values()).filter(f => f.total > 0);
+        const totalLoaded = knownFiles.reduce((s, f) => s + f.loaded, 0);
+        const totalBytes = knownFiles.reduce((s, f) => s + f.total, 0);
+        const pct = totalBytes > 0 ? Math.min((totalLoaded / totalBytes) * 100, 100) : 0;
+
+        const filled = Math.round(pct / 5);
+        const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+        const mb = (totalLoaded / 1024 / 1024).toFixed(1);
+        const totalMb = (totalBytes / 1024 / 1024).toFixed(1);
+        process.stdout.write(`\r  [${bar}] ${pct.toFixed(0).padStart(3)}%  ${mb} / ${totalMb} MB   `);
+      };
+
+      // Suppress noisy internal warnings from @huggingface/transformers during download
+      const originalStderrWrite = process.stderr.write.bind(process.stderr);
+      const stderrFilter = (chunk: unknown, ...args: unknown[]): boolean => {
+        const str = typeof chunk === 'string' ? chunk : String(chunk);
+        if (str.includes('content-length') || str.includes('dtype not specified')) return true;
+        return (originalStderrWrite as (...a: unknown[]) => boolean)(chunk, ...args);
+      };
+      process.stderr.write = stderrFilter as typeof process.stderr.write;
+
+      let cg;
+      try {
+        if (!KiroGraph.isInitialized(cwd)) {
+          process.stdout.write('  Downloading embedding model…\n');
+          cg = await KiroGraph.init(cwd, undefined, modelProgress);
+          process.stdout.write('\n');
+          console.log('  ✓ Created .kirograph/');
+        } else {
+          cg = await KiroGraph.open(cwd, modelProgress);
+          if (fileBytes.size > 0) process.stdout.write('\n');
+        }
+      } finally {
+        process.stderr.write = originalStderrWrite;
       }
-      const cg = await KiroGraph.open(cwd);
       console.log('  Indexing...');
       const result = await cg.indexAll({ onProgress: renderIndexProgress });
       process.stdout.write('\n');
@@ -143,10 +188,18 @@ export async function runInstaller(): Promise<void> {
       cg.close();
 
       if (patch.typesenseDashboard) {
-        await openTypesenseDashboard(cwd);
+        const dashboardServer = await openTypesenseDashboard(cwd);
         console.log(`  ${dim}Press Ctrl+C to stop the dashboard server when done.${reset}`);
-        process.on('SIGINT', () => { rl.close(); process.exit(0); });
-        return; // rl.close() handled via SIGINT
+        await new Promise<void>(resolve => {
+          process.on('SIGINT', () => {
+            if (dashboardServer) {
+              dashboardServer.close(() => resolve());
+            } else {
+              resolve();
+            }
+          });
+        });
+        return; // rl.close() handled in finally
       }
 
       if (patch.qdrantDashboard) {
@@ -154,7 +207,8 @@ export async function runInstaller(): Promise<void> {
       }
     }
 
-    console.log('\n  Done! Restart Kiro for the MCP server to load.\n');
+    console.log('\n  Done! Restart Kiro IDE for the MCP server to load.');
+    console.log('  For Kiro CLI, use the "kirograph" agent: kiro-cli --agent kirograph\n');
   } finally {
     rl.close();
   }
