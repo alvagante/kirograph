@@ -3,13 +3,13 @@ import { dim, reset, violet, bold } from '../ui';
 
 export function register(program: Command): void {
   program
-    .command('query <search>')
+    .command('query <search> [path]')
     .description('Search for symbols')
     .option('--kind <kind>', 'Filter by kind')
     .option('--limit <n>', 'Max results', '10')
-    .action(async (search: string, opts: { kind?: string; limit: string }) => {
+    .action(async (search: string, projectPath: string | undefined, opts: { kind?: string; limit: string }) => {
       const KiroGraph = (await import('../../index')).default;
-      const cg = await KiroGraph.open(process.cwd());
+      const cg = await KiroGraph.open(projectPath ?? process.cwd());
       const results = cg.searchNodes(search, opts.kind as any, parseInt(opts.limit));
       if (results.length === 0) {
         console.log(`  ${dim}No results for${reset} ${violet}${bold}${search}${reset}`);

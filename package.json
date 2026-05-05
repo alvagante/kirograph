@@ -51,6 +51,7 @@
     "@types/figlet": "^1.7.0",
     "@types/node": "^20.0.0",
     "@types/picomatch": "^4.0.2",
+    "@vitest/coverage-v8": "^4.1.5",
     "esbuild": "^0.28.0",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0",

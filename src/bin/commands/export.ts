@@ -137,7 +137,7 @@ function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function buildFiles(
+export function buildFiles(
   nodes: any[], edges: any[], projectName: string, includeContains: boolean, logoBase64?: string,
   fileModified?: Record<string, number>,
 ): { html: string; css: string; js: string } {

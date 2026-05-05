@@ -3,6 +3,8 @@ dist/
 
 # ide
 .vscode
+.idea
+.ai
 
 # kiro
 .kirograph/
@@ -21,3 +23,6 @@ package-lock.json
 
 # qdrant
 .qdrant-initialized
+
+#test
+coverage

@@ -1,0 +1,5 @@
+# Ephemeral process-state files — never commit these
+**/qdrant-server.json
+**/typesense-server.json
+**/kirograph.lock
+**/dirty
